@@ -8,6 +8,7 @@ Sheet Structure:
 
 Features:
   - Automatic column width adjustment based on content
+  - Automatic component detection from suite names
   - Color-coded status columns (Passed/Failed/Error/Skipped)
   - Version-aware sorting of test results (newest first)
   - Smart merging of new results with existing data
@@ -72,19 +73,39 @@ DOC = """
     xunit2gsheet.py - Upload xUnit test results to Google Sheets
 
     Usage:
-        xunit2gsheet.py --gsheet <gsheet_id> --xml <xml_file_path> --version <ceph_version>
+        xunit2gsheet.py --gsheet <gsheet_id> --xml <xml_file_path> \
+            --version <ceph_version>
         xunit2gsheet.py (-h | --help)
 
     Options:
         -h --help               Show this help message
-        --gsheet <gsheet_id>    Google Sheets ID to update (found in the sheet URL)
+        --gsheet <gsheet_id>    Google Sheets ID to update
         --xml <xml_file_path>   Path to xUnit XML test results file
-        --version <ceph_version>  Ceph version to associate with these test results
+        --version <ceph_version>  Ceph version
 
     Requirements:
-        - A service account JSON file named 'service_account.json' must be present
+        - A JSON file named 'service_account.json' must be present
         - Python packages: gspread, pandas, xml.etree.ElementTree, google-auth
     """
+
+
+def parse_suite_component(suite_name):
+    """
+    Parse test suite name to extract component (rgw, rbd, nfs, etc.)
+    Args:
+        suite_name (str): The suite name to parse
+    Returns:
+        str: The component name if found, otherwise empty string
+    """
+    if not suite_name or pd.isna(suite_name):
+        return ""
+    lower_name = suite_name.lower()
+
+    components = ["rgw", "rbd", "nfs", "cephfs", "rados"]
+    for comp in components:
+        if comp in lower_name:
+            return comp.upper()
+    return ""
 
 
 def parse_ceph_version(version_str):
@@ -115,7 +136,8 @@ def sort_version_columns(columns):
         list: Sorted version-specific columns ordered newest first
     """
     version_cols_status = [
-        col for col in columns if isinstance(col, str) and col.startswith("Status (")
+        col for col in columns if (
+            isinstance(col, str) and col.startswith("Status ("))
     ]
     version_cols_time = [
         col
@@ -127,13 +149,15 @@ def sort_version_columns(columns):
     for col in version_cols_status:
         version_str = col.split("(")[-1].rstrip(")")
         version_tuples_status.append((version_str, col))
-    version_tuples_status.sort(key=lambda x: parse_ceph_version(x[0]), reverse=True)
+    version_tuples_status.sort(key=lambda x: parse_ceph_version(x[0]),
+                               reverse=True)
     sorted_status_cols = [col for (ver, col) in version_tuples_status]
     version_tuples_time = []
     for col in version_cols_time:
         version_str = col.split("(")[-1].rstrip(")")
         version_tuples_time.append((version_str, col))
-    version_tuples_time.sort(key=lambda x: parse_ceph_version(x[0]), reverse=True)
+    version_tuples_time.sort(key=lambda x: parse_ceph_version(x[0]),
+                             reverse=True)
     sorted_time_cols = [col for (ver, col) in version_tuples_time]
     non_version_cols = [
         col
@@ -143,6 +167,8 @@ def sort_version_columns(columns):
     ordered_base_cols = []
     if "Test Suite Name" in non_version_cols:
         ordered_base_cols.append("Test Suite Name")
+    if "Component" in non_version_cols:
+        ordered_base_cols.append("Component")
     if "Test Case Name" in non_version_cols:
         ordered_base_cols.append("Test Case Name")
     if "polarion-testcase-id" in non_version_cols:
@@ -191,11 +217,14 @@ def parse_xml_file(xml_file_path, ceph_version=None):
 
     all_testsuites_elements = root.findall("testsuite")
     if all_testsuites_elements:
-        first_suite_props_element = all_testsuites_elements[0].find("properties")
+        first_suite_props_element = all_testsuites_elements[0].find(
+            "properties")
         if first_suite_props_element is not None:
             for prop in first_suite_props_element.findall("property"):
-                if prop.get("name") and prop.get("name") not in current_file_properties:
-                    current_file_properties[prop.get("name")] = prop.get("value")
+                if (prop.get("name") and prop.get("name")
+                        not in current_file_properties):
+                    current_file_properties[
+                        prop.get("name")] = prop.get("value")
 
     filtered_properties = OrderedDict()
     global PREFERRED_PROPERTIES
@@ -265,7 +294,8 @@ def parse_xml_file(xml_file_path, ceph_version=None):
                 actual_tc_status = "Failed"
             elif tc.find("error") is not None:
                 actual_tc_status = "Error"
-            elif tc.find("skipped") is not None or tc.get("status") == "skipped":
+            elif (tc.find("skipped") is not None
+                  or tc.get("status") == "skipped"):
                 actual_tc_status = "Skipped"
 
             tc_polarion_id = None
@@ -279,9 +309,11 @@ def parse_xml_file(xml_file_path, ceph_version=None):
                 OrderedDict(
                     [
                         ("Test Suite Name", suite_name),
+                        ("Component", parse_suite_component(suite_name)),
                         ("Test Case Name", tc_name),
                         (
-                            f"Status ({ceph_version})" if ceph_version else "Status",
+                            f"Status ({ceph_version})"
+                            if ceph_version else "Status",
                             actual_tc_status,
                         ),
                         ("polarion-testcase-id", tc_polarion_id),
@@ -292,6 +324,7 @@ def parse_xml_file(xml_file_path, ceph_version=None):
                 OrderedDict(
                     [
                         ("Test Suite Name", suite_name),
+                        ("Component", parse_suite_component(suite_name)),
                         ("Test Case Name", tc_name),
                         (
                             (
@@ -320,7 +353,8 @@ def get_gsheet_client(credentials_path):
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive.file",
     ]
-    creds = Credentials.from_service_account_file(credentials_path, scopes=scopes)
+    creds = Credentials.from_service_account_file(credentials_path,
+                                                  scopes=scopes)
     return gspread.authorize(creds)
 
 
@@ -336,7 +370,8 @@ def get_or_create_worksheet(spreadsheet, sheet_name):
     try:
         worksheet = spreadsheet.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows="100", cols="20")
+        worksheet = spreadsheet.add_worksheet(title=sheet_name,
+                                              rows="100", cols="20")
     return worksheet
 
 
@@ -355,10 +390,14 @@ def apply_gsheet_status_colors(worksheet):
         return
     # Define formats for different statuses
     formats = {
-        "PASSED": {"backgroundColor": {"red": 0.85, "green": 0.92, "blue": 0.83}},
-        "FAILED": {"backgroundColor": {"red": 0.96, "green": 0.8, "blue": 0.8}},
-        "ERROR": {"backgroundColor": {"red": 1.0, "green": 0.9, "blue": 0.7}},
-        "SKIPPED": {"backgroundColor": {"red": 0.8, "green": 0.8, "blue": 0.8}},
+        "PASSED": {"backgroundColor":
+                   {"red": 0.85, "green": 0.92, "blue": 0.83}},
+        "FAILED": {"backgroundColor":
+                   {"red": 0.96, "green": 0.8, "blue": 0.8}},
+        "ERROR": {"backgroundColor":
+                  {"red": 1.0, "green": 0.9, "blue": 0.7}},
+        "SKIPPED": {"backgroundColor":
+                    {"red": 0.8, "green": 0.8, "blue": 0.8}},
     }
     # Get all conditional format rules
     rules = gsf.get_conditional_format_rules(worksheet)
@@ -368,7 +407,8 @@ def apply_gsheet_status_colors(worksheet):
         return
 
     for col_idx, header_value in enumerate(header_row, 1):
-        if isinstance(header_value, str) and header_value.startswith("Status ("):
+        if (isinstance(header_value, str) and
+                header_value.startswith("Status (")):
             col_letter = gspread.utils.rowcol_to_a1(1, col_idx)[0]
             range_str = f"{col_letter}2:{col_letter}{worksheet.row_count}"
             for status, fmt in formats.items():
@@ -457,7 +497,8 @@ def update_gsheet(
         else None
     )
     build_number = (
-        all_properties_data[0].get("build", "").strip() if all_properties_data else ""
+        all_properties_data[0].get("build", "").strip()
+        if all_properties_data else ""
     )
     if build_number:
         try:
@@ -511,14 +552,16 @@ def update_gsheet(
                 df_existing_summary[col] = pd.NA
             if col not in df_new_summary.columns:
                 df_new_summary[col] = pd.NA
-        existing_suites = set(df_existing_summary["Test Suite Name"].dropna().unique())
+        existing_suites = set(
+            df_existing_summary["Test Suite Name"].dropna().unique())
         new_suites = set(df_new_summary["Test Suite Name"].dropna().unique())
         new_to_add = new_suites - existing_suites
         if new_to_add:
             df_summary_final = pd.concat(
                 [
                     df_existing_summary,
-                    df_new_summary[df_new_summary["Test Suite Name"].isin(new_to_add)],
+                    df_new_summary[
+                        df_new_summary["Test Suite Name"].isin(new_to_add)],
                 ]
             )
         else:
@@ -526,7 +569,8 @@ def update_gsheet(
     else:
         df_summary_final = df_new_summary
     ws_summary.clear()
-    set_with_dataframe(ws_summary, df_summary_final, include_index=False, resize=True)
+    set_with_dataframe(ws_summary, df_summary_final,
+                       include_index=False, resize=True)
     if not df_summary_final.empty:
         auto_adjust_gsheet_column_width(ws_summary, df_summary_final)
     ws_status = get_or_create_worksheet(spreadsheet, SHEET_TEST_STATUS)
@@ -540,11 +584,16 @@ def update_gsheet(
             version_col_pattern = (
                 f"Status ({ceph_version})" if ceph_version else "Status"
             )
-            new_status_col_name = df_new_test_status.columns[2]
+            new_status_col_name = df_new_test_status.columns[3]
             df_new_test_status_renamed = df_new_test_status.rename(
                 columns={new_status_col_name: version_col_pattern}
             )
-            merge_cols = ["Test Suite Name", "Test Case Name", "polarion-testcase-id"]
+            merge_cols = [
+                "Test Suite Name",
+                "Component",
+                "Test Case Name",
+                "polarion-testcase-id",
+            ]
             for col in merge_cols:
                 if col not in df_existing_test_status.columns:
                     df_existing_test_status[col] = pd.NA
@@ -556,7 +605,8 @@ def update_gsheet(
                 new_test_cases = df_new.index.difference(df_existing.index)
                 # Only add new test cases to avoid overwriting existing data
                 if not new_test_cases.empty:
-                    df_combined = pd.concat([df_existing, df_new.loc[new_test_cases]])
+                    df_combined = pd.concat(
+                        [df_existing, df_new.loc[new_test_cases]])
                 else:
                     df_combined = df_existing
                 # Reset index to get back to normal columns
@@ -580,19 +630,21 @@ def update_gsheet(
         else:
             # No existing data - just use the new data
             df_test_status_final = df_new_test_status
-            if ceph_version and len(df_test_status_final.columns) > 2:
-                status_col_name = df_test_status_final.columns[2]
+            if ceph_version and len(df_test_status_final.columns) > 3:
+                status_col_name = df_test_status_final.columns[3]
                 df_test_status_final.rename(
-                    columns={status_col_name: f"Status ({ceph_version})"}, inplace=True
+                    columns={status_col_name: f"Status({ceph_version})"},
+                    inplace=True
                 )
 
     except Exception as e:
         print(f"Error merging test status data: {e}, using new data only.")
         df_test_status_final = df_new_test_status
-        if ceph_version and len(df_test_status_final.columns) > 2:
-            status_col_name = df_test_status_final.columns[2]
+        if ceph_version and len(df_test_status_final.columns) > 3:
+            status_col_name = df_test_status_final.columns[3]
             df_test_status_final.rename(
-                columns={status_col_name: f"Status ({ceph_version})"}, inplace=True
+                columns={status_col_name: f"Status ({ceph_version})"},
+                inplace=True
             )
     # --- Test Case Timings Sheet ---
     ws_timings = get_or_create_worksheet(spreadsheet, SHEET_TEST_TIMINGS)
@@ -604,15 +656,17 @@ def update_gsheet(
         df_existing_test_timings.dropna(how="all", inplace=True)
         if not df_existing_test_timings.empty:
             time_version_col_pattern = (
-                f"Time (seconds) ({ceph_version})" if ceph_version else "Time (seconds)"
+                f"Time (seconds) ({ceph_version})"
+                if ceph_version else "Time (seconds)"
             )
             # Prepare the new data with proper column names
-            new_time_col_name = df_new_test_timings.columns[2]
+            new_time_col_name = df_new_test_timings.columns[3]
             df_new_test_timings_renamed = df_new_test_timings.rename(
                 columns={new_time_col_name: time_version_col_pattern}
             )
             # Merge columns to identify common test cases
-            merge_cols_time = ["Test Suite Name", "Test Case Name"]
+            merge_cols_time = ["Test Suite Name", "Component",
+                               "Test Case Name"]
             # Ensure all merge columns exist in both dataframes
             for col in merge_cols_time:
                 if col not in df_existing_test_timings.columns:
@@ -621,12 +675,14 @@ def update_gsheet(
                     df_new_test_timings_renamed[col] = pd.NA
             if time_version_col_pattern in df_existing_test_timings.columns:
                 # Set index for both dataframes
-                df_existing = df_existing_test_timings.set_index(merge_cols_time)
+                df_existing = df_existing_test_timings.set_index(
+                    merge_cols_time)
                 df_new = df_new_test_timings_renamed.set_index(merge_cols_time)
                 new_test_cases = df_new.index.difference(df_existing.index)
                 # Only add new test cases to avoid overwriting existing data
                 if not new_test_cases.empty:
-                    df_combined = pd.concat([df_existing, df_new.loc[new_test_cases]])
+                    df_combined = pd.concat(
+                        [df_existing, df_new.loc[new_test_cases]])
                 else:
                     df_combined = df_existing
                 # Reset index to get back to normal columns
@@ -651,18 +707,19 @@ def update_gsheet(
         else:
             # No existing data - just use the new data
             df_test_timings_final = df_new_test_timings
-            if ceph_version and len(df_test_timings_final.columns) > 2:
-                time_col_name = df_test_timings_final.columns[2]
+            if ceph_version and len(df_test_timings_final.columns) > 3:
+                time_col_name = df_test_timings_final.columns[3]
                 df_test_timings_final.rename(
-                    columns={time_col_name: f"Time (seconds)" f"({ceph_version})"},
+                    columns={time_col_name:
+                             f"Time (seconds)" f"({ceph_version})"},
                     inplace=True,
                 )
 
     except Exception as e:
         print(f"Error merging test timings data: {e}, using new data only.")
         df_test_timings_final = df_new_test_timings
-        if ceph_version and len(df_test_timings_final.columns) > 2:
-            time_col_name = df_test_timings_final.columns[2]
+        if ceph_version and len(df_test_timings_final.columns) > 3:
+            time_col_name = df_test_timings_final.columns[3]
             df_test_timings_final.rename(
                 columns={time_col_name: f"Time (seconds) ({ceph_version})"},
                 inplace=True,
@@ -693,17 +750,16 @@ if __name__ == "__main__":
     GOOGLE_CREDENTIALS_PATH = "service_account.json"
     if not os.path.exists(GOOGLE_CREDENTIALS_PATH):
         print(
-            f"Error: Google credentials file not found at '{GOOGLE_CREDENTIALS_PATH}'"
-        )
-        print(
-            "Please download your service account JSON key and name it 'service_account.json'"
+            f"Error: Google credentials file not"
+            f"found at '{GOOGLE_CREDENTIALS_PATH}'"
         )
         sys.exit(1)
     gsheet_id = args["--gsheet"]
     xml_file_path = args["--xml"]
     ceph_version_arg = args["--version"]
     print(
-        f"Processing {xml_file_path} for version {ceph_version_arg} into GSheet ID {gsheet_id}"
+        f"Processing {xml_file_path} for version"
+        f"{ceph_version_arg} into GSheet ID {gsheet_id}"
     )
     properties, summary, test_status, test_timings = parse_xml_file(
         xml_file_path, ceph_version_arg
